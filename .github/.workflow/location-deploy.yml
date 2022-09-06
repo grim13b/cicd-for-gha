@@ -1,0 +1,93 @@
+name: "[EXAMPLE] Localized secret variable"
+
+on:
+  push:
+    branches: 
+      - main
+      - 'releases/staging**'
+      - 'releases/production**'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      # ブランチ名を拾う
+      - name: "Get branch prefix"
+        run: echo "BRANCH-PREFIX=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
+
+      # ブランチが main の場合のみ実行される
+      - name: "Set deploy to [development]"
+        if: env.BRANCH-PREFIX == 'main'
+        # LOCATION を DEV にする 
+        run: echo "LOCATION=DEV" >> $GITHUB_ENV
+
+      # ブランチが release/staging で始まっている場合のみ実行される
+      - name: "Set deploy to [staging]"
+        if: startsWith(env.BRANCH-PREFIX, 'release/staging')
+        # LOCATION を STG にする 
+        run: echo "LOCATION=STG" >> $GITHUB_ENV
+
+      # ブランチが release/production で始まっている場合のみ実行される
+      - name: "Set deploy to [production]"
+        if: startsWith(env.BRANCH-PREFIX, 'release/production')
+        # LOCATION を PRD にする 
+        run: echo "LOCATION=PRD" >> $GITHUB_ENV
+
+    outputs:
+      # ローカライズした変数名を作って Job の出力結果にする
+      # ex) DEV-AWSARN STG-AWSARN PRD-AWSARN
+      iam-role-arn: ${{ format('{0}-AWSARN', env.LOCATION) }}
+      s3bucket-uri: ${{ format('{0}-S3URI', env.LOCATION) }}
+
+  # build フェーズは好みでOK。Deploy フェーズと合わせてもいい。
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Build
+        run: |
+          mkdir dist
+          echo "---------------------------------" >> ./dist/artifact.txt
+          echo "--- Tekitou na test mojiretsu ---" >> ./dist/artifact.txt
+          echo "---------------------------------" >> ./dist/artifact.txt
+      - name: "Upload artifact"
+        uses: actions/upload-artifact@v3
+        with:
+          name: my-artifact
+          path: ./dist/
+
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # ローカライズした変数名とビルド結果の Artifact が必要なので依存関係を持たせる
+    needs:
+      - prepare
+      - build
+    steps:
+      # ソースコードが必要じゃなければ Checkout は必要ない
+      #  - name: Checkout
+      #    uses: actions/checkout@v2
+
+      # "build" Job で作った artifact をダウンロードしてくる
+      - name: "Download artifact"
+        uses: actions/download-artifact@v3
+        with:
+          name: my-artifact
+          path: ./dist/
+
+      # 適宜 AWS とか Docker の認証を通す(例は OIDC 認証なので事前に IAM OIDC で事前に設定が必要)
+      # - name: "Configure AWS credentials"
+      #   uses: aws-actions/configure-aws-credentials@master
+      #   with:
+      #     aws-region: ap-northeast-1
+      #     role-to-assume: ${{ secrets[needs.prepare.outputs.iam-role-arn] }}
+
+      # 適当にデプロイする(例は S3 への sync。適宜 docker push なりに変える。)
+      - name: "Deploy"
+        run: |
+          ls -al ./dist
+          cat ./dist/artifact.txt
+          echo "aws s3 sync ./dist/ ${{ secrets[needs.prepare.outputs.s3bucket-uri] }}"
